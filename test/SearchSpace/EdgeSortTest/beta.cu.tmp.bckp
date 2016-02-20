@@ -1,0 +1,205 @@
+{% include "./CurandKernel/release.cu" %}
+{% include "./GenomeTest/beta.cu" %}
+
+texture<float, 2> t_ucInteractionMatrix;
+
+struct xAssemblyFlags {
+	unsigned char bitset;
+	unsigned char bitset2;
+	unsigned char red;
+	unsigned char fullcheckcutoff;
+
+	__device__ void set_Red(unsigned char __ucVal);
+	__device__ void set_TrivialUND(void);
+	__device__ void set_UnboundUND(void);
+	__device__ void set_StericUND(void);
+	__device__ void set_BusyFlag(void);
+	__device__ bool get_bTrivialUND(void);
+	__device__ bool get_bUnboundUND(void);
+	__device__ bool get_bStericUND(void);
+	__device__ bool get_bBusyFlag(void);
+	__device__ bool get_bUNDCondition(void);
+	__device__ unsigned char get_ucRed(void);
+	__device__ void ClearAll(void);
+	__device__ void ClearBitsets(void);
+};
+
+__device__ void xAssemblyFlags::set_Red(unsigned char __ucVal) {
+    this->red = __ucVal;
+}
+
+__device__ void xAssemblyFlags::set_TrivialUND(void) {
+    this->bitset |= (1 << 4);  //TEST
+}
+
+__device__ void xAssemblyFlags::set_UnboundUND(void) {
+    this->bitset |= (1 << 5); //TEST
+}
+
+__device__ void xAssemblyFlags::set_StericUND(void) {
+    this->bitset |= (1 << 6); //TEST
+}
+
+__device__ void xAssemblyFlags::set_BusyFlag(void) {
+    this->bitset |= (1 << 7);
+}
+
+__device__ bool xAssemblyFlags::get_bTrivialUND(void) {
+    return (bool) (this->bitset & (1 << 4));
+}
+
+__device__ bool xAssemblyFlags::get_bUnboundUND(void) {
+    return (bool) (this->bitset & (1 << 5));
+}
+
+__device__ bool xAssemblyFlags::get_bStericUND(void) {
+    return (bool) (this->bitset & (1 << 6));
+}
+
+__device__ bool xAssemblyFlags::get_bBusyFlag(void) {
+    return (bool) (this->bitset & (1 << 7));
+}
+
+__device__ bool xAssemblyFlags::get_bUNDCondition(void) {
+    return (bool) (this->bitset & 120);
+}
+
+__device__ unsigned char xAssemblyFlags::get_ucRed(void) {
+    return this->red;
+}
+
+__device__ void xAssemblyFlags::ClearAll(void) {
+    this->bitset = 0;
+    this->bitset2 = 0;
+    this->red=0;
+    this->fullcheckcutoff=0;
+    return;
+}
+
+__device__ void xAssemblyFlags::ClearBitsets(void) {
+    this->bitset = 0;
+    this->bitset2 = 0;
+    return;
+}
+
+
+struct xEdgeSort {
+	union {
+		unsigned char multi_d[mNrEdgeTypes][mNrTileTypes][mNrTileOrientations][mWarpSize];
+		unsigned char one_d[mNrEdgeTypes * mNrTileTypes * mNrTileOrientations * mWarpSize];
+	} data;
+
+	union {
+		unsigned short multi_d[mNrEdgeTypes][mWarpSize];
+		unsigned char one_d[mNrEdgeTypes * mWarpSize * sizeof(short)];
+	} length;
+
+	__device__ void Zeroise(xThreadInfo __xThreadInfo);
+        __device__ void Initialise(xThreadInfo __xThreadInfo, xGenomeSet *__xGenomeSet, short __sEdgeId = -1);
+        __device__ unsigned char GetBondingTile(xThreadInfo __xThreadInfo, short __sEdgeId, curandState *__xCurandState, xAssemblyFlags *__xAssemblyFlags);
+        __device__ void add_TileOrient(xThreadInfo __xThreadInfo, unsigned char __ucEdgeId, unsigned char __ucOrient, unsigned char __ucTileType);
+	__device__ __forceinline__ void set_xLength(xThreadInfo __xThreadInfo, unsigned char __ucEdgeId, unsigned char __ucLength);
+        __device__ void add_Tile(xThreadInfo __xThreadInfo, unsigned char __ucEdgeId);
+        __device__ unsigned char get_xData(xThreadInfo __xThreadInfo, unsigned char __ucEdgeId, unsigned char __ucTileId, unsigned char __ucOrientation);
+        __device__ unsigned char GetBondingTileOrientation(xThreadInfo __xThreadInfo, unsigned char __ucEdgeId, unsigned char __ucTileId, xAssemblyFlags *__xAssemblyFlags);
+        __device__ short get_xLength(xThreadInfo __xThreadInfo, unsigned short __sEdgeId);
+};
+
+__device__ void xEdgeSort::Initialise(xThreadInfo __xThreadInfo, xGenomeSet *__xGenomeSet, short __sEdgeId) {
+	if (__sEdgeId == -1) {
+		//for (int k = 0; k < mNrEdgeTypes; k++) {
+                if(__xThreadInfo.WarpId() < mNrEdgeTypes){
+                int k = __xThreadInfo.WarpId();
+			this->set_xLength(__xThreadInfo, k, 0);
+			bool r_bEdgeAdded = false;
+			for (int i = 0; i < mNrTileTypes; i++) { /*Traverse all TileTypes*/
+				for (int j = 0; j < mNrTileOrientations; j++) { /*Traverse all Orientations*/
+					if (tex2D(t_ucInteractionMatrix,
+							__xGenomeSet->get_xEdgeType(__xThreadInfo, i, j), k)
+							> 0) { /*Does Edge j of Tile i bond to Tile ThreadID*/
+						this->add_TileOrient(__xThreadInfo, k, j, i);
+						r_bEdgeAdded = true;
+					} else {
+						this->add_TileOrient(__xThreadInfo, k, j, mEMPTY_CELL);
+					}
+				}
+				if (r_bEdgeAdded) { /*EdgeAdded?*/
+					this->add_Tile(__xThreadInfo, k); //TEST
+					r_bEdgeAdded = 0;
+				} else {
+					/*Do Nothing*/
+				}
+			}
+                       //set_xLength(__xThreadInfo, 0, 5); //Test: 
+		}
+	} else {
+		this->set_xLength(__xThreadInfo, __sEdgeId, 0);
+		bool r_bEdgeAdded = false;
+		for (int i = 0; i < mNrTileTypes; i++) { /*Traverse all TileTypes*/
+			for (int j = 0; j < mNrTileOrientations; j++) { /*Traverse all Orientations*/
+				if (tex2D(t_ucInteractionMatrix, __xGenomeSet->get_xEdgeType(
+						__xThreadInfo, i, j), __sEdgeId) > 0) { /*Does Edge j of Tile i bond to Tile ThreadID*/
+					this->add_TileOrient(__xThreadInfo, __sEdgeId, j, i);
+					r_bEdgeAdded = true;
+				} else {
+					this->add_TileOrient(__xThreadInfo, __sEdgeId, j,
+							mEMPTY_CELL);
+				}
+			}
+			if (r_bEdgeAdded) { /*EdgeAdded?*/
+				this->add_Tile(__xThreadInfo, __sEdgeId);
+				r_bEdgeAdded = 0;
+			} else {
+				/*Do Nothing*/
+			}
+		}
+	}
+}
+
+__device__ __forceinline__ void xEdgeSort::set_xLength(xThreadInfo __xThreadInfo, unsigned char __ucEdgeId, unsigned char __ucLength) {
+	this->length.multi_d[__ucEdgeId][__xThreadInfo.BankId()] = __ucLength;
+}
+
+__device__ void xEdgeSort::add_TileOrient(xThreadInfo __xThreadInfo, unsigned char __ucEdgeId, unsigned char __ucOrient, unsigned char __ucTileType) {
+	this->data.multi_d[__ucEdgeId][this->get_xLength(__xThreadInfo, __ucEdgeId)][__ucOrient][__xThreadInfo.BankId()] = __ucTileType;
+}
+
+__device__ short xEdgeSort::get_xLength(xThreadInfo __xThreadInfo, unsigned short __sEdgeId) {
+	if (__sEdgeId < mNrEdgeTypes) {
+		return this->length.multi_d[__sEdgeId][__xThreadInfo.BankId()];
+	} else {
+		return 0;
+	}
+}
+
+void xEdgeSort::add_Tile(xThreadInfo __xThreadInfo, unsigned char __ucEdgeId) {
+	this->set_xLength(__xThreadInfo, __ucEdgeId, this->get_xLength(	__xThreadInfo, __ucEdgeId) + 1);
+}
+
+__global__ void TestEdgeSortKernel(unsigned char *dest, curandState *states)
+{
+    __shared__ xGenomeSet s_xGenomeSet;
+    __shared__ xEdgeSort s_xEdgeSort;
+    xThreadInfo r_xThreadInfo(threadIdx.x, threadIdx.y, blockIdx.x, blockIdx.y);
+    s_xGenomeSet.CopyFromGlobal(r_xThreadInfo, dest);
+    s_xEdgeSort.Initialise(r_xThreadInfo, &s_xGenomeSet, -1); 
+    for(int i=0;i<4;i++){
+        //s_xGenomeSet.data.multi_d[r_xThreadInfo.BankId()].data.one_d[i] = s_xEdgeSort.length.multi_d[i][r_xThreadInfo.BankId()];
+        s_xGenomeSet.data.multi_d[r_xThreadInfo.BankId()].data.one_d[i] = s_xEdgeSort.data.multi_d[6][0][i][r_xThreadInfo.BankId()];
+        //s_xGenomeSet.data.multi_d[r_xThreadInfo.BankId()].data.one_d[i] = tex2D(t_ucInteractionMatrix, i, 1);
+    }
+    s_xGenomeSet.CopyToGlobal(r_xThreadInfo, dest);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+

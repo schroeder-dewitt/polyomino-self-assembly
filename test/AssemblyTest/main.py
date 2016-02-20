@@ -1,0 +1,180 @@
+import pycuda.autoinit
+import pycuda.driver as drv
+import numpy
+
+from pycuda.compiler import SourceModule
+from jinja2 import Environment, PackageLoader
+
+def main():
+
+    #FourPermutations set-up
+    FourPermutations = numpy.array([ [1,2,3,4],
+                                  [1,2,4,3],
+                                  [1,3,2,4],
+                                  [1,3,4,2],
+                                  [1,4,2,3],
+                                  [1,4,3,2],
+                                  [2,1,3,4],
+                                  [2,1,4,3],
+                                  [2,3,1,4],
+                                  [2,3,4,1],
+                                  [2,4,1,3],
+                                  [2,4,3,1],
+                                  [3,2,1,4],
+                                  [3,2,4,1],
+                                  [3,1,2,4],
+                                  [3,1,4,2],
+                                  [3,4,2,1],
+                                  [3,4,1,2],
+                                  [4,2,3,1],
+                                  [4,2,1,3],
+                                  [4,3,2,1],
+                                  [4,3,1,2],
+                                  [4,1,2,3],
+                                  [4,1,3,2],]).astype(numpy.uint8)
+
+    #Create dictionary argument for rendering
+    RenderArgs= {"safe_memory_mapping":1,
+                 "aligned_byte_length_genome":8,
+                 "bit_length_edge_type":3, 
+                 "curand_nr_threads_per_block":256,
+                 "nr_tile_types":4,
+                 "nr_edge_types":8,
+                 "warpsize":32,
+                 "fit_dim_thread_x":1,
+                 "fit_dim_thread_y":1,
+                 "fit_dim_block_x":1,
+                 "fit_dim_grid_x":19,
+                 "fit_dim_grid_y":19,
+                 "fit_nr_four_permutations":24,
+                 "fit_length_movelist":244,
+                 "fit_nr_redundancy_grid_depth":2,
+                 "fit_nr_redundancy_assemblies":10,
+                 "fit_tile_index_starting_tile":0,
+                 "glob_nr_tile_orientations":4
+                }
+
+    # Set environment for template package Jinja2
+    env = Environment(loader=PackageLoader('main', './'))
+
+    # Load source code from file
+    Source = env.get_template('./alpha.cu') #Template( file(KernelFile).read() )
+    # Render source code
+    RenderedSource = Source.render( RenderArgs )
+
+    # Save rendered source code to file
+    f = open('./rendered.cu', 'w')
+    f.write(RenderedSource)
+    f.close()
+
+    #Load source code into module
+    KernelSourceModule = SourceModule(RenderedSource, options=None, arch="compute_20", code="sm_20")
+    Kernel = KernelSourceModule.get_function("TestAssemblyKernel")
+    CurandKernel = KernelSourceModule.get_function("CurandInitKernel")
+
+    #Initialise InteractionMatrix
+    InteractionMatrix = numpy.zeros( ( 8, 8) ).astype(numpy.float32)
+    def Delta(a,b):
+        if a==b:
+            return 1
+        else:
+            return 0
+    for i in range(InteractionMatrix.shape[0]):
+        for j in range(InteractionMatrix.shape[1]):
+            InteractionMatrix[i][j] = ( 1 - i % 2 ) * Delta( i, j+1 ) + ( i % 2 ) * Delta( i, j-1 )
+
+    #Set up our InteractionMatrix
+    InteractionMatrix_h = KernelSourceModule.get_texref("t_ucInteractionMatrix")
+    drv.matrix_to_texref( InteractionMatrix, InteractionMatrix_h , order="C")
+    print InteractionMatrix
+ 
+    #Set-up genomes
+    dest = numpy.arange(256).astype(numpy.uint8)
+    for i in range(0, 256/8):
+        #dest[i*8 + 0] = int('0b00100101',2) #CRASHES
+        #dest[i*8 + 1] = int('0b00010000',2) #CRASHES
+        #dest[i*8 + 0] = int('0b00101000',2)
+        #dest[i*8 + 1] = int('0b00000000',2)
+        #dest[i*8 + 2] = int('0b00000000',2)
+        #dest[i*8 + 3] = int('0b00000000',2)
+        #dest[i*8 + 4] = int('0b00000000',2)
+        #dest[i*8 + 5] = int('0b00000000',2)
+        #dest[i*8 + 6] = int('0b00000000',2)
+        #dest[i*8 + 7] = int('0b00000000',2)
+        dest[i*8 + 0] = 36
+        dest[i*8 + 1] = 151
+        dest[i*8 + 2] = 90
+        dest[i*8 + 3] = 109
+        dest[i*8 + 4] = 224
+        dest[i*8 + 5] = 4
+        dest[i*8 + 6] = 0
+        dest[i*8 + 7] = 0
+
+    dest[0] = 40
+    dest[1] = 0
+    dest[2] = 0
+    dest[3] = 0
+    dest[4] = 0
+    dest[5] = 0
+    dest[6] = 0
+    dest[7] = 0
+
+    dest_h = drv.mem_alloc(dest.nbytes)
+    drv.memcpy_htod(dest_h, dest)
+    print "Genomes before: "
+    print dest
+
+    #Set-up grids
+    grids = numpy.zeros((32, 19, 19)).astype(numpy.uint8)
+    grids_h = drv.mem_alloc(grids.nbytes)
+    drv.memcpy_htod(grids_h, grids)
+    print "Grids:"
+    print grids    
+
+    #Set-up fitness values
+    fitness = numpy.zeros(256).astype(numpy.float32)
+    fitness_h = drv.mem_alloc(fitness.nbytes)
+    drv.memcpy_htod(fitness_h, fitness)
+    print "Fitness values:"
+    print fitness
+
+    #Set-up curand
+    curand = numpy.zeros(40*256).astype(numpy.uint8);
+    curand_h = drv.mem_alloc(curand.nbytes)
+
+    #Set-up four permutations
+    FourPermutations_h = KernelSourceModule.get_global("c_ucFourPermutations") # Constant memory address
+    drv.memcpy_htod(FourPermutations_h[0], FourPermutations)
+
+    #Set-up timers
+    #start = drv.Event()
+    #stop = drv.Event()
+    #start.record()        
+
+    #Call kernels
+    CurandKernel(curand_h, block=(32,1,1), grid=(1,1))
+    Kernel(dest_h, fitness_h, grids_h, curand_h, block=(32,1,1), grid=(1,1))
+ 
+    #drv.Context.synchronize()
+    #Clean-up timer
+    #stop.synchronize()
+    #print "Total kernel time taken: %fs"%(start.time_till(stop)*1e-3)
+    #print "Mean time per generation: %fs"%(start.time_till(stop)*1e-3 / NrGenerations)
+    #pass    
+
+    #Output
+    drv.memcpy_dtoh(dest, dest_h)
+    print "Genomes after: "
+    print dest
+    drv.memcpy_dtoh(fitness, fitness_h)
+    print "Fitness after: "
+    print fitness
+    drv.memcpy_dtoh(grids, grids_h)
+    print "Grids[0] after: "
+    print grids[0]
+    print "Grids[31] after:"
+    print grids[31]
+
+if __name__ == '__main__':
+    main()
+
